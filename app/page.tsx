@@ -259,9 +259,8 @@ export default function Home() {
     setHotelsLoading(true);
 
     const { lat, lon, name } = selected;
-    const query = `[out:json][timeout:20];(node["tourism"="hotel"]["stars"~"^[45]$"](around:8000,${lat},${lon});way["tourism"="hotel"]["stars"~"^[45]$"](around:8000,${lat},${lon}););out body 10;`;
 
-    fetch(`https://overpass-api.de/api/interpreter?data=${encodeURIComponent(query)}`)
+    fetch(`/api/hotels?lat=${lat}&lon=${lon}`)
       .then((r) => r.json())
       .then((json) => {
         const seen = new Set<string>();
@@ -329,11 +328,10 @@ export default function Home() {
       {/* ── Navbar ───────────────────────────────────────────────────────────── */}
       <header className="absolute top-0 left-0 right-0 z-20 flex items-center justify-between px-6 py-3 border-b border-primary/10 bg-background/80 backdrop-blur-sm">
 
-        {/* Logo — replace inner content with <Image src="/logo.png" .../> */}
+        {/* Logo */}
         <div className="shrink-0">
-          <div className="h-9 w-9 rounded border border-primary/30 bg-black flex items-center justify-center">
-            <span className="text-primary text-[10px] font-bold tracking-tight">GG</span>
-          </div>
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img src="/logo.jpg" alt="GoGlobe" className="h-14 w-auto object-contain mix-blend-lighten" />
         </div>
 
         {/* Search */}
