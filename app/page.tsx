@@ -1,10 +1,28 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useMemo } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Search, MapPin, X, ExternalLink, Star } from "lucide-react";
+import { Search, MapPin, X, ExternalLink, Star, Plane } from "lucide-react";
 import { Globe3D } from "@/components/globe-3d";
+
+function haversineKm(lat1: number, lon1: number, lat2: number, lon2: number): number {
+  const R = 6371;
+  const toRad = (x: number) => (x * Math.PI) / 180;
+  const dLat = toRad(lat2 - lat1);
+  const dLon = toRad(lon2 - lon1);
+  const a =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) ** 2;
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+
+function formatFlightTime(km: number): string {
+  const hours = km / 850 + 0.75;
+  const h = Math.floor(hours);
+  const m = Math.round((hours - h) * 60);
+  return `${h}h${m > 0 ? m.toString().padStart(2, "0") : ""}`;
+}
 interface HotelResult {
   hotelId: string;
   name: string;
@@ -250,6 +268,27 @@ export default function Home() {
   const [liveHotels, setLiveHotels] = useState<HotelResult[] | null>(null);
   const [hotelsLoading, setHotelsLoading] = useState(false);
   const [hotelsError, setHotelsError] = useState<string | null>(null);
+  const [camDist, setCamDist] = useState(9);
+  const [userLatLon, setUserLatLon] = useState<{ lat: number; lon: number } | null>(null);
+
+  // Geolocation on mount
+  useEffect(() => {
+    navigator.geolocation?.getCurrentPosition(
+      (pos) => setUserLatLon({ lat: pos.coords.latitude, lon: pos.coords.longitude }),
+      () => {} // silently ignore denied
+    );
+  }, []);
+
+  // Estimated flight time
+  const flightTime = useMemo(() => {
+    if (!selected || !userLatLon) return null;
+    const km = haversineKm(userLatLon.lat, userLatLon.lon, selected.lat, selected.lon);
+    return formatFlightTime(km);
+  }, [selected, userLatLon]);
+
+  // Hotel zoom tier: 5★ far → 4★ medium → 2-3★+Airbnb close
+  const hotelMinStars = camDist > 2.3 ? 5 : camDist > 1.75 ? 4 : 2;
+  const showAirbnb = camDist < 1.75;
 
   // Fetch live hotels via Overpass (OpenStreetMap) — client-side, no API key
   useEffect(() => {
@@ -398,18 +437,23 @@ export default function Home() {
             cityMarkers={CITY_MARKERS}
             selected={selected}
             onSelect={openDestination}
+            onCamDist={setCamDist}
+            userLatLon={userLatLon ?? undefined}
             className="absolute inset-0 w-full h-full"
           />
 
-          {/* Bottom text overlay */}
-          <div className="absolute bottom-8 left-1/2 -translate-x-1/2 z-10 text-center pointer-events-none">
+          {/* Centered text overlay */}
+          <div className="absolute bottom-[22%] left-1/2 -translate-x-1/2 z-10 text-center pointer-events-none">
+            <p className="text-[10px] tracking-[0.4em] uppercase text-primary/50 font-light mb-3">
+              Trouvez votre prochain voyage
+            </p>
             <h2
               className="text-4xl italic text-primary"
               style={{ fontFamily: "var(--font-playfair)" }}
             >
               Explorez le Monde
             </h2>
-            <p className="text-sm text-muted-foreground mt-1.5">
+            <p className="text-sm text-muted-foreground mt-2">
               Cliquez sur une destination pour découvrir nos sélections exclusives
             </p>
           </div>
@@ -438,6 +482,12 @@ export default function Home() {
                       <span>{selected.flag}</span>
                       <span>{selected.country}</span>
                     </p>
+                    {flightTime && (
+                      <p className="flex items-center gap-1.5 mt-1 text-xs text-primary/70">
+                        <Plane className="h-3 w-3" />
+                        <span>~{flightTime} depuis votre position</span>
+                      </p>
+                    )}
                   </div>
                   <button
                     className="mt-1 h-8 w-8 rounded-full border border-primary/20 flex items-center justify-center text-muted-foreground hover:text-primary hover:border-primary/50 transition-colors"
@@ -470,24 +520,45 @@ export default function Home() {
               {/* Cards */}
               <div className="flex-1 overflow-y-auto px-8 py-5 space-y-3">
                 {activeTab === "hotels" ? (
-                  hotelsLoading ? (
-                    <>
-                      <HotelSkeleton />
-                      <HotelSkeleton />
-                      <HotelSkeleton />
-                    </>
-                  ) : hotelsError ? (
-                    <div className="rounded-xl border border-primary/10 bg-background/60 p-4">
-                      <p className="text-xs text-muted-foreground">
-                        Impossible de charger les hôtels.
-                      </p>
-                      <p className="text-xs text-primary/60 mt-1 font-mono">{hotelsError}</p>
-                    </div>
-                  ) : liveHotels && liveHotels.length > 0 ? (
-                    liveHotels.map((h) => <HotelCard key={h.hotelId} hotel={h} />)
-                  ) : (
-                    <p className="text-xs text-muted-foreground px-1">Aucun hôtel trouvé.</p>
-                  )
+                  <>
+                    {/* Zoom tier label */}
+                    <p className="text-[10px] tracking-widest uppercase text-primary/40 font-light pb-1">
+                      {hotelMinStars === 5 ? "★★★★★ Luxe" : hotelMinStars === 4 ? "★★★★ Premium" : "Tous les hébergements"}
+                    </p>
+                    {hotelsLoading ? (
+                      <>
+                        <HotelSkeleton />
+                        <HotelSkeleton />
+                        <HotelSkeleton />
+                      </>
+                    ) : hotelsError ? (
+                      <div className="rounded-xl border border-primary/10 bg-background/60 p-4">
+                        <p className="text-xs text-muted-foreground">Impossible de charger les hôtels.</p>
+                        <p className="text-xs text-primary/60 mt-1 font-mono">{hotelsError}</p>
+                      </div>
+                    ) : liveHotels && liveHotels.length > 0 ? (
+                      liveHotels
+                        .filter((h) => h.rating >= hotelMinStars)
+                        .map((h) => <HotelCard key={h.hotelId} hotel={h} />)
+                    ) : (
+                      <p className="text-xs text-muted-foreground px-1">Aucun hôtel trouvé.</p>
+                    )}
+                    {/* Airbnb CTA at close zoom */}
+                    {showAirbnb && (
+                      <a
+                        href={`https://www.airbnb.com/s/${encodeURIComponent(selected?.name ?? "")}/homes`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="flex items-center justify-between gap-3 rounded-xl border border-primary/10 bg-background/60 p-4 hover:border-primary/40 hover:bg-primary/5 transition-colors"
+                      >
+                        <div>
+                          <p className="font-medium text-sm text-foreground">Airbnb</p>
+                          <p className="text-xs text-muted-foreground mt-0.5">Appartements & maisons</p>
+                        </div>
+                        <ExternalLink className="h-4 w-4 text-primary/50 shrink-0" />
+                      </a>
+                    )}
+                  </>
                 ) : (
                   tabItems.map((item) => <PlaceCard key={item.name} item={item} />)
                 )}

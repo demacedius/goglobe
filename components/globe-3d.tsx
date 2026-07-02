@@ -2,7 +2,7 @@
 
 import { useRef, useState, Suspense, useEffect, useMemo } from "react";
 import { Canvas, useFrame, useThree } from "@react-three/fiber";
-import { OrbitControls, Stars, useTexture } from "@react-three/drei";
+import { OrbitControls, Stars, useTexture, Line } from "@react-three/drei";
 import * as THREE from "three";
 
 // ─── Constants ───────────────────────────────────────────────────────────────
@@ -13,8 +13,7 @@ const MIN_DIST = 1.25;
 const MAX_DIST = 9;
 const INITIAL_DIST = 2.6;
 
-// Camera distance thresholds for city label tiers
-const TIER2_DIST = 2.3; // cities appear when closer than this
+const TIER2_DIST = 2.3;
 const TIER3_DIST = 1.75;
 
 // ─── Atmosphere shader ───────────────────────────────────────────────────────
@@ -44,19 +43,6 @@ function latLonToVec3(lat: number, lon: number, r = 1.01): THREE.Vector3 {
     r * Math.cos(phi),
     r * Math.sin(phi) * Math.sin(theta)
   );
-}
-
-function getSunDirection(): THREE.Vector3 {
-  const now = new Date();
-  const utcHour = now.getUTCHours() + now.getUTCMinutes() / 60;
-  const dayOfYear = Math.floor(
-    (Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()) -
-      Date.UTC(now.getUTCFullYear(), 0, 0)) /
-      86400000
-  );
-  const decl = 23.45 * Math.sin((2 * Math.PI * (dayOfYear - 81)) / 365);
-  const lon = (utcHour - 12) * -15;
-  return latLonToVec3(decl, lon, 10);
 }
 
 // ─── Sub-components ──────────────────────────────────────────────────────────
@@ -95,7 +81,6 @@ function Earth() {
   const { gl, camera } = useThree();
   const matRef = useRef<THREE.MeshPhongMaterial>(null);
 
-  // Apply anisotropic filtering once after texture load
   useMemo(() => {
     const maxAniso = gl.capabilities.getMaxAnisotropy();
     for (const t of [colorMap, bumpMap, specularMap]) {
@@ -106,11 +91,9 @@ function Earth() {
     }
   }, [colorMap, bumpMap, specularMap, gl]);
 
-  // Dynamic bump: more relief visible when close
   useFrame(() => {
     if (!matRef.current) return;
     const dist = camera.position.length();
-    // 0.04 at max zoom-out (9) → 0.25 at min zoom-in (1.25)
     matRef.current.bumpScale = THREE.MathUtils.mapLinear(dist, 9, 1.25, 0.04, 0.22);
   });
 
@@ -130,7 +113,7 @@ function Earth() {
   );
 }
 
-// ─── Smooth zoom (replaces OrbitControls built-in zoom) ──────────────────────
+// ─── Smooth zoom ─────────────────────────────────────────────────────────────
 
 function SmoothZoom() {
   const { camera, gl } = useThree();
@@ -142,7 +125,6 @@ function SmoothZoom() {
 
     const onWheel = (e: WheelEvent) => {
       e.preventDefault();
-      // Normalize across deltaMode (pixel vs line vs page)
       const raw = e.deltaMode === 1 ? e.deltaY * 40 : e.deltaY;
       const factor = raw * 0.0012;
       targetDist.current = THREE.MathUtils.clamp(
@@ -156,10 +138,7 @@ function SmoothZoom() {
       if (e.touches.length === 2) {
         const dx = e.touches[0].clientX - e.touches[1].clientX;
         const dy = e.touches[0].clientY - e.touches[1].clientY;
-        pinchRef.current = {
-          dist: Math.hypot(dx, dy),
-          camDist: camera.position.length(),
-        };
+        pinchRef.current = { dist: Math.hypot(dx, dy), camDist: camera.position.length() };
       }
     };
 
@@ -177,20 +156,15 @@ function SmoothZoom() {
       }
     };
 
-    const onTouchEnd = () => {
-      pinchRef.current = null;
-    };
+    const onTouchEnd = () => { pinchRef.current = null; };
 
-    // capture:true ensures we intercept before OrbitControls
     canvas.addEventListener("wheel", onWheel, { passive: false, capture: true });
     canvas.addEventListener("touchstart", onTouchStart, { passive: true });
     canvas.addEventListener("touchmove", onTouchMove, { passive: true });
     canvas.addEventListener("touchend", onTouchEnd, { passive: true });
 
     return () => {
-      canvas.removeEventListener("wheel", onWheel, {
-        capture: true,
-      } as EventListenerOptions);
+      canvas.removeEventListener("wheel", onWheel, { capture: true } as EventListenerOptions);
       canvas.removeEventListener("touchstart", onTouchStart);
       canvas.removeEventListener("touchmove", onTouchMove);
       canvas.removeEventListener("touchend", onTouchEnd);
@@ -200,15 +174,117 @@ function SmoothZoom() {
   useFrame(() => {
     const curr = camera.position.length();
     const next = THREE.MathUtils.lerp(curr, targetDist.current, 0.1);
-    if (Math.abs(curr - next) > 0.0001) {
-      camera.position.setLength(next);
-    }
+    if (Math.abs(curr - next) > 0.0001) camera.position.setLength(next);
   });
 
   return null;
 }
 
-// ─── Pin & city position tracker ─────────────────────────────────────────────
+// ─── Camera distance reporter ────────────────────────────────────────────────
+
+function CamDistReporter({ onCamDist }: { onCamDist?: (d: number) => void }) {
+  const { camera } = useThree();
+  const lastD = useRef(INITIAL_DIST);
+  useFrame(() => {
+    const d = camera.position.length();
+    if (Math.abs(d - lastD.current) > 0.08) {
+      lastD.current = d;
+      onCamDist?.(d);
+    }
+  });
+  return null;
+}
+
+// ─── User position marker (blue pulsing dot) ─────────────────────────────────
+
+function UserMarker({ lat, lon }: { lat: number; lon: number }) {
+  const ringRef = useRef<THREE.Mesh>(null);
+
+  useFrame(({ clock }) => {
+    if (!ringRef.current) return;
+    const t = clock.elapsedTime;
+    const pulse = (Math.sin(t * 3) + 1) / 2;
+    ringRef.current.scale.setScalar(1 + 0.4 * pulse);
+    (ringRef.current.material as THREE.MeshBasicMaterial).opacity = 0.6 - 0.4 * pulse;
+  });
+
+  const pos = latLonToVec3(lat, lon, 1.015);
+
+  return (
+    <group position={pos}>
+      <mesh>
+        <sphereGeometry args={[0.006, 8, 8]} />
+        <meshBasicMaterial color="#5599ff" />
+      </mesh>
+      <mesh ref={ringRef} rotation={[Math.PI / 2, 0, 0]}>
+        <ringGeometry args={[0.008, 0.012, 16]} />
+        <meshBasicMaterial color="#5599ff" transparent opacity={0.5} side={THREE.DoubleSide} />
+      </mesh>
+    </group>
+  );
+}
+
+// ─── Flight arc + animated plane ─────────────────────────────────────────────
+
+function FlightArc({
+  fromLat, fromLon, toLat, toLon,
+}: {
+  fromLat: number; fromLon: number; toLat: number; toLon: number;
+}) {
+  const planeRef = useRef<THREE.Mesh>(null);
+  const progress = useRef(0);
+
+  const { arcPoints, getPoint } = useMemo(() => {
+    const from = latLonToVec3(fromLat, fromLon).normalize();
+    const to = latLonToVec3(toLat, toLon).normalize();
+    const ARC_H = 0.26;
+
+    const getPoint = (t: number): THREE.Vector3 => {
+      const p = from.clone().lerp(to, t).normalize();
+      p.multiplyScalar(1.02 + ARC_H * Math.sin(Math.PI * t));
+      return p;
+    };
+
+    const arcPoints: THREE.Vector3[] = [];
+    for (let i = 0; i <= 90; i++) {
+      arcPoints.push(getPoint(i / 90));
+    }
+
+    return { arcPoints, getPoint };
+  }, [fromLat, fromLon, toLat, toLon]);
+
+  useFrame((_, delta) => {
+    if (!planeRef.current) return;
+    progress.current = (progress.current + delta * 0.1) % 1;
+    const pos = getPoint(progress.current);
+    const next = getPoint(Math.min(progress.current + 0.015, 0.999));
+    const dir = next.clone().sub(pos).normalize();
+    planeRef.current.position.copy(pos);
+    planeRef.current.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), dir);
+  });
+
+  return (
+    <>
+      <Line
+        points={arcPoints}
+        color={GOLD}
+        lineWidth={1.5}
+        dashed
+        dashSize={0.04}
+        gapSize={0.025}
+        opacity={0.75}
+        transparent
+      />
+      {/* Animated plane (gold cone) */}
+      <mesh ref={planeRef}>
+        <coneGeometry args={[0.004, 0.013, 6]} />
+        <meshBasicMaterial color={GOLD} />
+      </mesh>
+    </>
+  );
+}
+
+// ─── Pin & city tracker ───────────────────────────────────────────────────────
 
 interface GlobeDestination {
   name: string;
@@ -239,9 +315,6 @@ function PinTracker({
 
     const projectPin = (lat: number, lon: number) => {
       pos.copy(latLonToVec3(lat, lon));
-      // Cull points on the back hemisphere (facing away from camera)
-      // Correct sphere occlusion: point is visible if angle from sub-camera < arccos(1/D)
-      // Equivalent to: C·P > |P|   (not just > 0)
       const facing = camera.position.dot(pos) > pos.length();
       if (!facing) return null;
       vec.copy(pos).project(camera);
@@ -252,12 +325,10 @@ function PinTracker({
       };
     };
 
-    // Tier-1 destination pins (always visible, clickable)
     for (const d of destinations) {
       const btn = document.getElementById(`pin-btn-${d.name}`);
       const dot = document.getElementById(`pin-dot-${d.name}`);
       if (!btn || !dot) continue;
-
       const proj = projectPin(d.lat, d.lon);
       if (!proj) {
         btn.style.display = "none";
@@ -272,25 +343,15 @@ function PinTracker({
       dot.style.top = `${proj.y}px`;
     }
 
-    // Tier-2 / tier-3 city labels (zoom-dependent)
     for (const d of cityMarkers) {
       const el = document.getElementById(`city-${d.name}`);
       if (!el) continue;
-
       const tierVisible =
         (d.tier === 2 && camDist < TIER2_DIST) ||
         (d.tier === 3 && camDist < TIER3_DIST);
-
-      if (!tierVisible) {
-        el.style.display = "none";
-        continue;
-      }
-
+      if (!tierVisible) { el.style.display = "none"; continue; }
       const proj = projectPin(d.lat, d.lon);
-      if (!proj) {
-        el.style.display = "none";
-        continue;
-      }
+      if (!proj) { el.style.display = "none"; continue; }
       el.style.display = "block";
       el.style.left = `${proj.x}px`;
       el.style.top = `${proj.y}px`;
@@ -305,18 +366,19 @@ function PinTracker({
 interface SceneProps {
   destinations: GlobeDestination[];
   cityMarkers: CityMarker[];
+  onCamDist?: (d: number) => void;
+  userLatLon?: { lat: number; lon: number };
+  targetLatLon?: { lat: number; lon: number };
 }
 
-function Scene({ destinations, cityMarkers }: SceneProps) {
-  const sun = getSunDirection();
-
+function Scene({ destinations, cityMarkers, onCamDist, userLatLon, targetLatLon }: SceneProps) {
   return (
     <>
       <color attach="background" args={[GLOBE_BG]} />
 
-      <ambientLight intensity={0.08} />
-      <directionalLight position={[sun.x, sun.y, sun.z]} intensity={2.2} color="#fff5e8" />
-      <pointLight position={[-8, -4, -8]} intensity={0.18} color="#2244aa" />
+      {/* Uniformly lit everywhere — no day/night shadow */}
+      <ambientLight intensity={1.5} />
+      <directionalLight position={[4, 3, 4]} intensity={0.2} color="#fff8f0" />
 
       <Stars radius={300} depth={60} count={5000} factor={3} saturation={0} fade speed={0.3} />
 
@@ -325,8 +387,22 @@ function Scene({ destinations, cityMarkers }: SceneProps) {
         <Atmosphere />
       </Suspense>
 
+      {/* User position marker */}
+      {userLatLon && <UserMarker lat={userLatLon.lat} lon={userLatLon.lon} />}
+
+      {/* Flight arc + animated plane */}
+      {userLatLon && targetLatLon && (
+        <FlightArc
+          fromLat={userLatLon.lat}
+          fromLon={userLatLon.lon}
+          toLat={targetLatLon.lat}
+          toLon={targetLatLon.lon}
+        />
+      )}
+
       <PinTracker destinations={destinations} cityMarkers={cityMarkers} />
       <SmoothZoom />
+      <CamDistReporter onCamDist={onCamDist} />
 
       <OrbitControls
         enablePan={false}
@@ -345,8 +421,10 @@ function Scene({ destinations, cityMarkers }: SceneProps) {
 export interface Globe3DProps {
   destinations: GlobeDestination[];
   cityMarkers?: CityMarker[];
-  selected: { name: string } | null;
+  selected: { name: string; lat: number; lon: number } | null;
   onSelect: (name: string) => void;
+  onCamDist?: (d: number) => void;
+  userLatLon?: { lat: number; lon: number };
   className?: string;
 }
 
@@ -355,13 +433,18 @@ export function Globe3D({
   cityMarkers = [],
   selected,
   onSelect,
+  onCamDist,
+  userLatLon,
   className = "",
 }: Globe3DProps) {
   const [hoveredPin, setHoveredPin] = useState<string | null>(null);
 
+  const targetLatLon = selected
+    ? { lat: selected.lat, lon: selected.lon }
+    : undefined;
+
   return (
     <div className={`relative ${className}`}>
-      {/* WebGL Canvas */}
       <Canvas
         className="absolute inset-0 w-full h-full"
         camera={{ position: [0, 0, INITIAL_DIST], fov: 42 }}
@@ -372,10 +455,16 @@ export function Globe3D({
           toneMappingExposure: 1.8,
         }}
       >
-        <Scene destinations={destinations} cityMarkers={cityMarkers} />
+        <Scene
+          destinations={destinations}
+          cityMarkers={cityMarkers}
+          onCamDist={onCamDist}
+          userLatLon={userLatLon}
+          targetLatLon={targetLatLon}
+        />
       </Canvas>
 
-      {/* ── Tier-1 destination pin buttons (outside canvas → no OrbitControls conflict) */}
+      {/* Tier-1 destination pins */}
       {destinations.map((d) => {
         const isActive = selected?.name === d.name;
         const isHovered = hoveredPin === d.name;
@@ -383,7 +472,6 @@ export function Globe3D({
 
         return (
           <div key={d.name}>
-            {/* Invisible hit area */}
             <button
               id={`pin-btn-${d.name}`}
               aria-label={d.name}
@@ -405,8 +493,6 @@ export function Globe3D({
                 justifyContent: "center",
               }}
             />
-
-            {/* Visual dot + label */}
             <div
               id={`pin-dot-${d.name}`}
               style={{
@@ -454,7 +540,7 @@ export function Globe3D({
         );
       })}
 
-      {/* ── Tier-2/3 city labels (label-only, appear on zoom) */}
+      {/* Tier-2/3 city labels */}
       {cityMarkers.map((d) => (
         <div
           key={`city-${d.name}`}
@@ -467,28 +553,22 @@ export function Globe3D({
             zIndex: 8,
           }}
         >
-          {/* Dot */}
           <span
             style={{
               display: "block",
               width: d.tier === 2 ? 5 : 3,
               height: d.tier === 2 ? 5 : 3,
-              backgroundColor: d.tier === 2
-                ? "rgba(196,176,0,0.75)"
-                : "rgba(196,176,0,0.55)",
+              backgroundColor: d.tier === 2 ? "rgba(196,176,0,0.75)" : "rgba(196,176,0,0.55)",
               borderRadius: "50%",
               boxShadow: "0 0 4px 1px rgba(196,176,0,0.3)",
               margin: "0 auto",
             }}
           />
-          {/* Label */}
           <span
             style={{
               display: "block",
               marginTop: 3,
-              color: d.tier === 2
-                ? "rgba(220,200,80,0.85)"
-                : "rgba(196,176,0,0.6)",
+              color: d.tier === 2 ? "rgba(220,200,80,0.85)" : "rgba(196,176,0,0.6)",
               fontSize: d.tier === 2 ? 10 : 8,
               fontWeight: 500,
               whiteSpace: "nowrap",

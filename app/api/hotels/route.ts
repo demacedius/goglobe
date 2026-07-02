@@ -9,13 +9,13 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ error: "lat and lon required" }, { status: 400 });
   }
 
-  const query = `[out:json][timeout:25];(node["tourism"="hotel"]["stars"~"^[45]$"](around:8000,${lat},${lon});way["tourism"="hotel"]["stars"~"^[45]$"](around:8000,${lat},${lon}););out body 15;`;
+  // Fetch 2–5 star hotels — frontend filters by zoom tier
+  const query = `[out:json][timeout:25];(node["tourism"="hotel"]["stars"~"^[2-5]$"](around:8000,${lat},${lon});way["tourism"="hotel"]["stars"~"^[2-5]$"](around:8000,${lat},${lon}););out body 30;`;
 
   const res = await fetch(
     `https://overpass-api.de/api/interpreter?data=${encodeURIComponent(query)}`,
     {
       headers: {
-        // Overpass rejects requests with Accept: application/json (returns 406)
         Accept: "*/*",
         "User-Agent": "GoGlobe/1.0 (travel app; contact: demacedius@gmail.com)",
       },
