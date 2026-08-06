@@ -11,10 +11,43 @@ const GOLD = "#C4B000";
 const GLOBE_BG = "#0a0a06";
 const MIN_DIST = 1.25;
 const MAX_DIST = 9;
-const INITIAL_DIST = 2.6;
+const INITIAL_DIST = 4.0;
 
-const TIER2_DIST = 2.3;
-const TIER3_DIST = 1.75;
+// Well-separated so each tier gets real scroll room instead of the user
+// blowing through 2-3 tiers in a couple of wheel notches. Tier 1 spans
+// [TIER2_DIST, MAX_DIST] — deliberately wide since it's the "just selected,
+// haven't zoomed yet" resting state — down to a narrower tier 3 sliver near
+// MIN_DIST, matching how zooming toward a sphere naturally decelerates
+// perceptually as you approach the surface.
+const TIER2_DIST = 2.6;
+const TIER3_DIST = 1.6;
+
+// City satellite map starts fading in as soon as a destination is selected
+// (tier 1) and keeps sharpening in opacity through tier 2 and tier 3, so it
+// reads as "getting more precise" as the user zooms in, instead of popping
+// in abruptly at the closest zoom only.
+const SATELLITE_FADE_START = 3.4;
+
+// The map itself grows and sharpens across the same three tiers as the hotel
+// star reveal: a wide/coarse ESRI fetch far out, tightening to a close/sharp
+// fetch at the closest zoom, while the drawn patch grows to match — so the
+// city map visibly "zooms in" alongside the hotel list instead of being a
+// single static image. fetchKm is the real-world bbox requested from ESRI
+// (smaller = sharper detail per pixel); patchKm is how large that image is
+// drawn on the globe (larger than its true footprint so it stays legible).
+const SATELLITE_TIERS = [
+  { fetchKm: 30, patchKm: 480 }, // tier 1 — first zoom, 5★ only
+  { fetchKm: 14, patchKm: 700 }, // tier 2 — 3-4★
+  { fetchKm: 6, patchKm: 950 },  // tier 3 — closest, 2★+
+] as const;
+
+function satelliteTierIndex(camDist: number): 0 | 1 | 2 {
+  if (camDist > TIER2_DIST) return 0;
+  if (camDist > TIER3_DIST) return 1;
+  return 2;
+}
+
+const EARTH_RADIUS_KM = 6371;
 
 // ─── Atmosphere shader ───────────────────────────────────────────────────────
 
@@ -115,18 +148,33 @@ function Earth() {
 
 // ─── Smooth zoom ─────────────────────────────────────────────────────────────
 
-function SmoothZoom() {
+function SmoothZoom({
+  containerRef,
+  targetDistRef,
+}: {
+  containerRef: React.RefObject<HTMLDivElement | null>;
+  targetDistRef: React.RefObject<number>;
+}) {
   const { camera, gl } = useThree();
-  const targetDist = useRef(INITIAL_DIST);
+  const targetDist = targetDistRef;
   const pinchRef = useRef<{ dist: number; camDist: number } | null>(null);
 
   useEffect(() => {
-    const canvas = gl.domElement;
+    // Listen on the outer container (not the canvas, and not just its direct
+    // parent — R3F wraps the canvas in its own internal divs) so scrolling
+    // over sibling overlays — destination pin buttons, city labels — still
+    // zooms; those elements sit on top of the canvas but aren't inside it,
+    // so a canvas-only listener never sees events that start on them.
+    const canvas: HTMLElement = containerRef.current ?? gl.domElement;
 
     const onWheel = (e: WheelEvent) => {
       e.preventDefault();
       const raw = e.deltaMode === 1 ? e.deltaY * 40 : e.deltaY;
-      const factor = raw * 0.0012;
+      // Slower than a naive 1:1 mapping so a single mouse-wheel notch doesn't
+      // blow through 2-3 star tiers at once — this gives ~12-15 notches to
+      // travel the full INITIAL_DIST → MIN_DIST range, enough to actually
+      // perceive each tier instead of skipping over it.
+      const factor = raw * 0.0009;
       targetDist.current = THREE.MathUtils.clamp(
         targetDist.current * (1 + factor),
         MIN_DIST,
@@ -169,12 +217,58 @@ function SmoothZoom() {
       canvas.removeEventListener("touchmove", onTouchMove);
       canvas.removeEventListener("touchend", onTouchEnd);
     };
-  }, [camera, gl.domElement]);
+  }, [camera, gl.domElement, containerRef]);
 
   useFrame(() => {
     const curr = camera.position.length();
     const next = THREE.MathUtils.lerp(curr, targetDist.current, 0.1);
     if (Math.abs(curr - next) > 0.0001) camera.position.setLength(next);
+  });
+
+  return null;
+}
+
+// ─── Fly to selection (rotate to face the pin on click) ──────────────────────
+
+function FlyToSelection({
+  target,
+}: {
+  target: { lat: number; lon: number } | undefined;
+}) {
+  const { camera } = useThree();
+  const lastKey = useRef<string | null>(null);
+  const anim = useRef<{ from: THREE.Vector3; to: THREE.Vector3; t: number } | null>(null);
+
+  useEffect(() => {
+    if (!target) {
+      lastKey.current = null;
+      return;
+    }
+    const key = `${target.lat},${target.lon}`;
+    if (key === lastKey.current) return;
+    lastKey.current = key;
+
+    anim.current = {
+      from: camera.position.clone().normalize(),
+      to: latLonToVec3(target.lat, target.lon, 1).normalize(),
+      t: 0,
+    };
+    // Rotation only — the first click should still land on the tier-1 (5-star)
+    // view. Zoom stays entirely under the user's control via scroll/pinch, and
+    // the city satellite patch reveals itself once they zoom in to tier 3.
+  }, [target, camera]);
+
+  useFrame((_, delta) => {
+    const a = anim.current;
+    if (!a) return;
+    a.t = Math.min(a.t + delta / 1.1, 1);
+    const ease = 1 - Math.pow(1 - a.t, 3);
+    const dir = a.from.clone().lerp(a.to, ease).normalize();
+    // Only steer direction here — SmoothZoom independently lerps the radius
+    // toward targetDistRef each frame, so preserving the current length and
+    // letting it own magnitude keeps the two animations from fighting.
+    camera.position.copy(dir.multiplyScalar(camera.position.length()));
+    if (a.t >= 1) anim.current = null;
   });
 
   return null;
@@ -284,6 +378,164 @@ function FlightArc({
   );
 }
 
+// ─── City satellite patch (ESRI World Imagery, tangent to the globe) ────────
+
+function tangentBasisAt(lat: number, lon: number): { normal: THREE.Vector3; north: THREE.Vector3; east: THREE.Vector3 } {
+  const normal = latLonToVec3(lat, lon, 1).normalize();
+  const north = latLonToVec3(lat + 0.5, lon, 1).sub(latLonToVec3(lat - 0.5, lon, 1)).normalize();
+  const east = latLonToVec3(lat, lon + 0.5, 1).sub(latLonToVec3(lat, lon - 0.5, 1)).normalize();
+  return { normal, north, east };
+}
+
+// Builds the satellite patch as a grid wrapped onto the sphere (each vertex
+// offset in the local tangent plane, then re-normalized back onto the
+// sphere) instead of one flat quad. A flat quad tangent at a single point
+// visibly floats off the sphere's curvature at the patch's edges once it
+// gets large (worst at the closest zoom tier, ~950km wide) — this keeps it
+// flush with the globe at every tier.
+function buildCurvedPatchGeometry(
+  normal: THREE.Vector3,
+  north: THREE.Vector3,
+  east: THREE.Vector3,
+  sizeWorld: number,
+  segments = 14
+): THREE.BufferGeometry {
+  const positions: number[] = [];
+  const uvs: number[] = [];
+  const indices: number[] = [];
+  const p = new THREE.Vector3();
+
+  for (let j = 0; j <= segments; j++) {
+    const v = (j / segments - 0.5) * sizeWorld;
+    for (let i = 0; i <= segments; i++) {
+      const u = (i / segments - 0.5) * sizeWorld;
+      p.copy(normal).addScaledVector(east, u).addScaledVector(north, v);
+      p.normalize().multiplyScalar(1.004);
+      positions.push(p.x, p.y, p.z);
+      // v must increase toward north (matches texture.flipY default: uv.y=1
+      // samples the top row of the source image, which ESRI's bbox export
+      // always puts at max-latitude/north) — flip it here and the map
+      // renders upside down (south where north should be).
+      uvs.push(i / segments, j / segments);
+    }
+  }
+  for (let j = 0; j < segments; j++) {
+    for (let i = 0; i < segments; i++) {
+      const a = j * (segments + 1) + i;
+      const b = a + 1;
+      const c = a + (segments + 1);
+      const d = c + 1;
+      // east × north = outward normal (right-handed ENU frame), so this
+      // winding is the one that faces outward/toward the camera.
+      indices.push(a, b, c, b, d, c);
+    }
+  }
+
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+  geo.setAttribute("uv", new THREE.Float32BufferAttribute(uvs, 2));
+  geo.setIndex(indices);
+  return geo;
+}
+
+// Soft radial falloff so the patch fades into the surrounding globe texture
+// instead of ending in a hard rectangle — generated once and reused for
+// every city/tier.
+let softEdgeAlphaTexture: THREE.Texture | null = null;
+function getSoftEdgeAlphaTexture(): THREE.Texture {
+  if (softEdgeAlphaTexture) return softEdgeAlphaTexture;
+  const canvas = document.createElement("canvas");
+  canvas.width = canvas.height = 256;
+  const ctx = canvas.getContext("2d")!;
+  const gradient = ctx.createRadialGradient(128, 128, 0, 128, 128, 128);
+  gradient.addColorStop(0, "rgba(255,255,255,1)");
+  gradient.addColorStop(0.72, "rgba(255,255,255,1)");
+  gradient.addColorStop(1, "rgba(255,255,255,0)");
+  ctx.fillStyle = gradient;
+  ctx.fillRect(0, 0, 256, 256);
+  softEdgeAlphaTexture = new THREE.CanvasTexture(canvas);
+  return softEdgeAlphaTexture;
+}
+
+function CitySatellitePatch({ lat, lon }: { lat: number; lon: number }) {
+  const { camera } = useThree();
+  const matRef = useRef<THREE.MeshBasicMaterial>(null);
+  const [tierIdx, setTierIdx] = useState<0 | 1 | 2>(0);
+  const lastTierRef = useRef<0 | 1 | 2>(0);
+  // Keeps every tier's texture once loaded (not just the current one) so the
+  // patch can keep showing the previous, coarser image while a sharper fetch
+  // for the new tier is still in flight, instead of flashing blank.
+  const [textures, setTextures] = useState<(THREE.Texture | null)[]>([null, null, null]);
+
+  useFrame(() => {
+    const idx = satelliteTierIndex(camera.position.length());
+    if (idx !== lastTierRef.current) {
+      lastTierRef.current = idx;
+      setTierIdx(idx);
+    }
+  });
+
+  useEffect(() => {
+    let cancelled = false;
+    const { fetchKm } = SATELLITE_TIERS[tierIdx];
+    const latSpan = fetchKm / 111.32;
+    const lonSpan = fetchKm / (111.32 * Math.max(Math.cos((lat * Math.PI) / 180), 0.15));
+    const bbox = [lon - lonSpan / 2, lat - latSpan / 2, lon + lonSpan / 2, lat + latSpan / 2].join(",");
+    const url = `https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/export?bbox=${bbox}&bboxSR=4326&imageSR=4326&size=768,768&format=jpg&f=image`;
+
+    new THREE.TextureLoader().load(
+      url,
+      (tex) => {
+        if (cancelled) return;
+        tex.colorSpace = THREE.SRGBColorSpace;
+        setTextures((prev) => {
+          const next = [...prev];
+          next[tierIdx] = tex;
+          return next;
+        });
+      },
+      undefined,
+      () => {} // silently ignore load failure — falls back to another loaded tier, or stays hidden
+    );
+
+    return () => { cancelled = true; };
+  }, [lat, lon, tierIdx]);
+
+  const { normal, north, east } = useMemo(() => tangentBasisAt(lat, lon), [lat, lon]);
+
+  const texture = textures[tierIdx] ?? textures.find((t) => t) ?? null;
+  const size = SATELLITE_TIERS[tierIdx].patchKm / EARTH_RADIUS_KM;
+  const geometry = useMemo(
+    () => buildCurvedPatchGeometry(normal, north, east, size),
+    [normal, north, east, size]
+  );
+  const alphaMap = useMemo(() => getSoftEdgeAlphaTexture(), []);
+
+  useFrame(() => {
+    if (!matRef.current) return;
+    const dist = camera.position.length();
+    matRef.current.opacity = texture
+      ? THREE.MathUtils.clamp(THREE.MathUtils.mapLinear(dist, SATELLITE_FADE_START, MIN_DIST + 0.05, 0, 1), 0, 1)
+      : 0;
+  });
+
+  if (!texture) return null;
+
+  return (
+    <mesh geometry={geometry}>
+      <meshBasicMaterial
+        ref={matRef}
+        map={texture}
+        alphaMap={alphaMap}
+        transparent
+        opacity={0}
+        toneMapped={false}
+        depthWrite={false}
+      />
+    </mesh>
+  );
+}
+
 // ─── Pin & city tracker ───────────────────────────────────────────────────────
 
 interface GlobeDestination {
@@ -299,12 +551,27 @@ interface CityMarker {
   tier: 2 | 3;
 }
 
+interface HotelMarker {
+  name: string;
+  lat: number;
+  lon: number;
+  rating: number;
+  address?: string;
+  website?: string;
+  mapsUrl: string;
+  bookingUrl: string;
+}
+
 function PinTracker({
   destinations,
   cityMarkers,
+  hotelMarkers,
+  hotelCenter,
 }: {
   destinations: GlobeDestination[];
   cityMarkers: CityMarker[];
+  hotelMarkers: HotelMarker[];
+  hotelCenter?: { lat: number; lon: number };
 }) {
   const { camera, size } = useThree();
   const vec = new THREE.Vector3();
@@ -313,16 +580,39 @@ function PinTracker({
   useFrame(() => {
     const camDist = camera.position.length();
 
-    const projectPin = (lat: number, lon: number) => {
-      pos.copy(latLonToVec3(lat, lon));
-      const facing = camera.position.dot(pos) > pos.length();
+    const projectPoint = (p: THREE.Vector3) => {
+      const facing = camera.position.dot(p) > p.length();
       if (!facing) return null;
-      vec.copy(pos).project(camera);
+      vec.copy(p).project(camera);
       if (Math.abs(vec.x) > 1 || Math.abs(vec.y) > 1) return null;
       return {
         x: ((vec.x + 1) / 2) * size.width,
         y: ((-vec.y + 1) / 2) * size.height,
       };
+    };
+
+    const projectPin = (lat: number, lon: number) => {
+      pos.copy(latLonToVec3(lat, lon));
+      return projectPoint(pos);
+    };
+
+    // Hotels are real-world coordinates, but the satellite patch is drawn
+    // much larger than its true footprint to stay legible (see
+    // SATELLITE_TIERS). Project hotels the same exaggerated way — as an
+    // offset from the selected city, scaled up by the current tier's factor —
+    // so they land on the patch instead of clustering at their true (tiny)
+    // spacing, and stay aligned with the patch as it grows across tiers.
+    const projectHotel = (lat: number, lon: number) => {
+      if (!hotelCenter) return null;
+      const { fetchKm, patchKm } = SATELLITE_TIERS[satelliteTierIndex(camDist)];
+      const { normal, north, east } = tangentBasisAt(hotelCenter.lat, hotelCenter.lon);
+      const dxKm = (lon - hotelCenter.lon) * 111.32 * Math.cos((hotelCenter.lat * Math.PI) / 180);
+      const dyKm = (lat - hotelCenter.lat) * 111.32;
+      const kmToOffset = (patchKm / EARTH_RADIUS_KM) / fetchKm;
+      pos.copy(normal).multiplyScalar(1.004);
+      pos.addScaledVector(east, dxKm * kmToOffset);
+      pos.addScaledVector(north, dyKm * kmToOffset);
+      return projectPoint(pos);
     };
 
     for (const d of destinations) {
@@ -356,6 +646,16 @@ function PinTracker({
       el.style.left = `${proj.x}px`;
       el.style.top = `${proj.y}px`;
     }
+
+    for (const h of hotelMarkers) {
+      const el = document.getElementById(`hotel-${h.name}`);
+      if (!el) continue;
+      const proj = projectHotel(h.lat, h.lon);
+      if (!proj) { el.style.display = "none"; continue; }
+      el.style.display = "block";
+      el.style.left = `${proj.x}px`;
+      el.style.top = `${proj.y}px`;
+    }
   });
 
   return null;
@@ -366,12 +666,16 @@ function PinTracker({
 interface SceneProps {
   destinations: GlobeDestination[];
   cityMarkers: CityMarker[];
+  hotelMarkers: HotelMarker[];
   onCamDist?: (d: number) => void;
   userLatLon?: { lat: number; lon: number };
   targetLatLon?: { lat: number; lon: number };
+  containerRef: React.RefObject<HTMLDivElement | null>;
 }
 
-function Scene({ destinations, cityMarkers, onCamDist, userLatLon, targetLatLon }: SceneProps) {
+function Scene({ destinations, cityMarkers, hotelMarkers, onCamDist, userLatLon, targetLatLon, containerRef }: SceneProps) {
+  const targetDistRef = useRef(INITIAL_DIST);
+
   return (
     <>
       <color attach="background" args={[GLOBE_BG]} />
@@ -390,6 +694,16 @@ function Scene({ destinations, cityMarkers, onCamDist, userLatLon, targetLatLon 
       {/* User position marker */}
       {userLatLon && <UserMarker lat={userLatLon.lat} lon={userLatLon.lon} />}
 
+      {/* High-res satellite patch over the selected city, fades in on deep zoom.
+          Keyed by city so tier/texture cache resets cleanly on selection change. */}
+      {targetLatLon && (
+        <CitySatellitePatch
+          key={`${targetLatLon.lat},${targetLatLon.lon}`}
+          lat={targetLatLon.lat}
+          lon={targetLatLon.lon}
+        />
+      )}
+
       {/* Flight arc + animated plane */}
       {userLatLon && targetLatLon && (
         <FlightArc
@@ -400,8 +714,9 @@ function Scene({ destinations, cityMarkers, onCamDist, userLatLon, targetLatLon 
         />
       )}
 
-      <PinTracker destinations={destinations} cityMarkers={cityMarkers} />
-      <SmoothZoom />
+      <PinTracker destinations={destinations} cityMarkers={cityMarkers} hotelMarkers={hotelMarkers} hotelCenter={targetLatLon} />
+      <SmoothZoom containerRef={containerRef} targetDistRef={targetDistRef} />
+      <FlyToSelection target={targetLatLon} />
       <CamDistReporter onCamDist={onCamDist} />
 
       <OrbitControls
@@ -421,6 +736,7 @@ function Scene({ destinations, cityMarkers, onCamDist, userLatLon, targetLatLon 
 export interface Globe3DProps {
   destinations: GlobeDestination[];
   cityMarkers?: CityMarker[];
+  hotelMarkers?: HotelMarker[];
   selected: { name: string; lat: number; lon: number } | null;
   onSelect: (name: string) => void;
   onCamDist?: (d: number) => void;
@@ -431,6 +747,7 @@ export interface Globe3DProps {
 export function Globe3D({
   destinations,
   cityMarkers = [],
+  hotelMarkers = [],
   selected,
   onSelect,
   onCamDist,
@@ -438,13 +755,27 @@ export function Globe3D({
   className = "",
 }: Globe3DProps) {
   const [hoveredPin, setHoveredPin] = useState<string | null>(null);
+  const [activeHotel, setActiveHotel] = useState<string | null>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
+
+  // Hotel cards open on hover for mouse/trackpad users, and on tap for touch
+  // devices — matchMedia is the standard way to tell the two apart, since a
+  // touchscreen never truly satisfies "hover: hover" + "pointer: fine".
+  const [isTouch, setIsTouch] = useState(false);
+  useEffect(() => {
+    setIsTouch(!window.matchMedia("(hover: hover) and (pointer: fine)").matches);
+  }, []);
 
   const targetLatLon = selected
     ? { lat: selected.lat, lon: selected.lon }
     : undefined;
 
+  useEffect(() => {
+    setActiveHotel(null);
+  }, [selected?.name]);
+
   return (
-    <div className={`relative ${className}`}>
+    <div ref={containerRef} className={`relative ${className}`}>
       <Canvas
         className="absolute inset-0 w-full h-full"
         camera={{ position: [0, 0, INITIAL_DIST], fov: 42 }}
@@ -458,9 +789,11 @@ export function Globe3D({
         <Scene
           destinations={destinations}
           cityMarkers={cityMarkers}
+          hotelMarkers={hotelMarkers}
           onCamDist={onCamDist}
           userLatLon={userLatLon}
           targetLatLon={targetLatLon}
+          containerRef={containerRef}
         />
       </Canvas>
 
@@ -581,8 +914,129 @@ export function Globe3D({
           </span>
         </div>
       ))}
+
+      {/* Hotel markers for the selected city, revealed progressively by star tier */}
+      {hotelMarkers.map((h) => {
+        const isActive = activeHotel === h.name;
+        const primaryUrl = h.website ?? h.mapsUrl;
+        return (
+          <div
+            key={`hotel-${h.name}`}
+            id={`hotel-${h.name}`}
+            style={{
+              display: "none",
+              position: "absolute",
+              transform: "translate(-50%, -50%)",
+              zIndex: isActive ? 20 : 7,
+            }}
+            onMouseEnter={() => { if (!isTouch) setActiveHotel(h.name); }}
+            onMouseLeave={() => { if (!isTouch) setActiveHotel(null); }}
+          >
+            <button
+              aria-label={h.name}
+              title={`${h.name} — ${h.rating}★`}
+              onClick={() => { if (isTouch) setActiveHotel(isActive ? null : h.name); }}
+              style={{
+                display: "block",
+                width: isActive ? 13 : 9,
+                height: isActive ? 13 : 9,
+                borderRadius: "50%",
+                backgroundColor: "#f5f0e6",
+                border: "1px solid rgba(10,10,6,0.6)",
+                boxShadow: isActive
+                  ? "0 0 8px 3px rgba(245,240,230,0.85)"
+                  : "0 0 5px 1px rgba(245,240,230,0.55)",
+                cursor: "pointer",
+                padding: 0,
+              }}
+            />
+            {isActive && (
+              <div
+                style={{
+                  position: "absolute",
+                  bottom: "calc(100% + 10px)",
+                  left: "50%",
+                  transform: "translateX(-50%)",
+                  width: "min(220px, 78vw)",
+                  padding: 12,
+                  borderRadius: 12,
+                  backgroundColor: "rgba(10,10,6,0.95)",
+                  border: "1px solid rgba(196,176,0,0.3)",
+                  boxShadow: "0 8px 24px rgba(0,0,0,0.5)",
+                  cursor: "default",
+                }}
+              >
+                <button
+                  aria-label="Fermer"
+                  onClick={() => setActiveHotel(null)}
+                  style={{
+                    position: "absolute",
+                    top: 6,
+                    right: 8,
+                    background: "none",
+                    border: "none",
+                    color: "rgba(245,240,230,0.5)",
+                    fontSize: 14,
+                    cursor: "pointer",
+                    padding: 2,
+                  }}
+                >
+                  ×
+                </button>
+                <p style={{ color: "#f5f0e6", fontSize: 13, fontWeight: 600, marginRight: 14, marginBottom: 2 }}>
+                  {h.name}
+                </p>
+                <p style={{ color: GOLD, fontSize: 11, marginBottom: h.address ? 2 : 8 }}>
+                  {"★".repeat(h.rating)}
+                </p>
+                {h.address && (
+                  <p style={{ color: "rgba(245,240,230,0.55)", fontSize: 10, marginBottom: 8 }}>
+                    {h.address}
+                  </p>
+                )}
+                <div style={{ display: "flex", gap: 6 }}>
+                  <a
+                    href={primaryUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    style={{
+                      flex: 1,
+                      textAlign: "center",
+                      fontSize: 10,
+                      fontWeight: 600,
+                      padding: "6px 4px",
+                      borderRadius: 8,
+                      backgroundColor: GOLD,
+                      color: GLOBE_BG,
+                    }}
+                  >
+                    {h.website ? "Site officiel" : "Voir sur Maps"}
+                  </a>
+                  <a
+                    href={h.bookingUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    style={{
+                      flex: 1,
+                      textAlign: "center",
+                      fontSize: 10,
+                      fontWeight: 600,
+                      padding: "6px 4px",
+                      borderRadius: 8,
+                      border: `1px solid ${GOLD}`,
+                      color: GOLD,
+                    }}
+                  >
+                    Booking.com
+                  </a>
+                </div>
+              </div>
+            )}
+          </div>
+        );
+      })}
     </div>
   );
 }
 
-export type { GlobeDestination, CityMarker };
+export type { GlobeDestination, CityMarker, HotelMarker };

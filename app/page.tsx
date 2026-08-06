@@ -3,7 +3,7 @@
 import { useState, useEffect, useMemo } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Search, MapPin, X, ExternalLink, Star, Plane } from "lucide-react";
+import { Search, MapPin, X, Plane } from "lucide-react";
 import { Globe3D } from "@/components/globe-3d";
 
 function haversineKm(lat1: number, lon1: number, lat2: number, lon2: number): number {
@@ -31,11 +31,11 @@ interface HotelResult {
   website?: string;
   mapsUrl: string;
   bookingUrl: string;
+  lat?: number;
+  lon?: number;
 }
 
 // ─── Types ────────────────────────────────────────────────────────────────────
-
-type TabKey = "hotels" | "restaurants" | "beaches" | "flights";
 
 interface PlaceItem {
   name: string;
@@ -186,85 +186,11 @@ const CITY_MARKERS: Array<{ name: string; lat: number; lon: number; tier: 2 | 3 
   { name: "Hakone",      lat: 35.23,  lon: 139.11,  tier: 3 },
 ];
 
-const TABS: { key: TabKey; label: string }[] = [
-  { key: "hotels", label: "Hôtels" },
-  { key: "restaurants", label: "Restau" },
-  { key: "beaches", label: "Plages" },
-  { key: "flights", label: "Vols" },
-];
-
-// ─── Cards ────────────────────────────────────────────────────────────────────
-
-function PlaceCard({ item }: { item: PlaceItem }) {
-  return (
-    <div className="rounded-xl border border-primary/10 bg-background/60 p-4 hover:border-primary/40 hover:bg-primary/5 transition-colors">
-      <div className="flex items-center justify-between gap-3">
-        <p className="font-medium text-sm text-foreground truncate">{item.name}</p>
-        <span className="shrink-0 text-primary text-sm font-medium">{item.badge}</span>
-      </div>
-    </div>
-  );
-}
-
-function HotelCard({ hotel }: { hotel: HotelResult }) {
-  // Priority: official website → Google Maps (shows Booking/Expedia inline prices)
-  const primaryUrl = hotel.website ?? hotel.mapsUrl;
-
-  return (
-    <div className="rounded-xl border border-primary/10 bg-background/60 p-4 hover:border-primary/40 hover:bg-primary/5 transition-colors">
-      <div className="flex items-start justify-between gap-3 mb-3">
-        <div className="min-w-0">
-          <p className="font-medium text-sm text-foreground truncate">{hotel.name}</p>
-          <div className="flex items-center gap-0.5 mt-1">
-            {Array.from({ length: hotel.rating }).map((_, i) => (
-              <Star key={i} className="h-3 w-3 fill-primary text-primary" />
-            ))}
-          </div>
-          {hotel.address && (
-            <p className="text-xs text-muted-foreground mt-0.5 truncate">{hotel.address}</p>
-          )}
-        </div>
-      </div>
-      <div className="flex gap-2">
-        {/* Primary: official site or Google Maps */}
-        <a
-          href={primaryUrl}
-          target="_blank"
-          rel="noopener noreferrer"
-          className="flex-1 flex items-center justify-center gap-1.5 py-1.5 rounded-lg bg-primary text-background text-xs font-semibold hover:bg-primary/90 transition-colors"
-        >
-          <ExternalLink className="h-3 w-3" />
-          {hotel.website ? "Site officiel" : "Voir sur Maps"}
-        </a>
-        {/* Secondary: Booking.com search */}
-        <a
-          href={hotel.bookingUrl}
-          target="_blank"
-          rel="noopener noreferrer"
-          className="flex-1 flex items-center justify-center gap-1.5 py-1.5 rounded-lg border border-primary/30 text-primary text-xs font-semibold hover:bg-primary/10 transition-colors"
-        >
-          Booking.com
-        </a>
-      </div>
-    </div>
-  );
-}
-
-function HotelSkeleton() {
-  return (
-    <div className="rounded-xl border border-primary/10 bg-background/60 p-4 animate-pulse">
-      <div className="h-3.5 bg-primary/10 rounded w-3/4 mb-2" />
-      <div className="h-3 bg-primary/10 rounded w-1/3" />
-    </div>
-  );
-}
-
 // ─── Main page ────────────────────────────────────────────────────────────────
 
 export default function Home() {
   const [selected, setSelected] = useState<Destination | null>(null);
   const [search, setSearch] = useState("");
-  const [activeTab, setActiveTab] = useState<TabKey>("hotels");
   const [liveHotels, setLiveHotels] = useState<HotelResult[] | null>(null);
   const [hotelsLoading, setHotelsLoading] = useState(false);
   const [hotelsError, setHotelsError] = useState<string | null>(null);
@@ -286,9 +212,28 @@ export default function Home() {
     return formatFlightTime(km);
   }, [selected, userLatLon]);
 
-  // Hotel zoom tier: 5★ far → 4★ medium → 2-3★+Airbnb close
-  const hotelMinStars = camDist > 2.3 ? 5 : camDist > 1.75 ? 4 : 2;
-  const showAirbnb = camDist < 1.75;
+  // Hotel zoom tier: 5★ far → 3-4★ medium → 2★ close (cumulative reveal)
+  const hotelMinStars = camDist > 2.3 ? 5 : camDist > 1.75 ? 3 : 2;
+
+  // Filtered by star tier, plotted directly on the globe/city map as points
+  const hotelMarkers = useMemo(
+    () =>
+      (liveHotels ?? [])
+        .filter((h): h is HotelResult & { lat: number; lon: number } =>
+          h.rating >= hotelMinStars && h.lat != null && h.lon != null
+        )
+        .map((h) => ({
+          name: h.name,
+          lat: h.lat,
+          lon: h.lon,
+          rating: h.rating,
+          address: h.address,
+          website: h.website,
+          mapsUrl: h.mapsUrl,
+          bookingUrl: h.bookingUrl,
+        })),
+    [liveHotels, hotelMinStars]
+  );
 
   // Fetch live hotels via Overpass (OpenStreetMap) — client-side, no API key
   useEffect(() => {
@@ -318,6 +263,8 @@ export default function Home() {
             website: website ? (website.startsWith("http") ? website : `https://${website}`) : undefined,
             mapsUrl: `https://www.google.com/maps/search/${encodeURIComponent(hotelName + " " + name)}`,
             bookingUrl: `https://www.booking.com/searchresults.html?ss=${encodeURIComponent(hotelName)}&nflt=class%3D4%3Bclass%3D5&src=searchresults&ac_suggestion_list_length=1&search_selected=true`,
+            lat: el.lat ?? el.center?.lat,
+            lon: el.lon ?? el.center?.lon,
           });
         }
         setLiveHotels(
@@ -346,39 +293,28 @@ export default function Home() {
     const d = DESTINATIONS.find((d) => d.name === name);
     if (d) {
       setSelected(d);
-      setActiveTab("hotels");
       setSearch("");
     }
   }
 
-  const tabItems: PlaceItem[] = selected
-    ? activeTab === "restaurants"
-      ? selected.restaurants
-      : activeTab === "beaches"
-      ? selected.beaches
-      : activeTab === "flights"
-      ? selected.flights
-      : []
-    : [];
-
   return (
-    <div className="flex h-screen w-screen overflow-hidden bg-background text-foreground">
+    <div className="flex h-dvh w-screen overflow-hidden bg-background text-foreground">
 
       {/* ── Navbar ───────────────────────────────────────────────────────────── */}
-      <header className="absolute top-0 left-0 right-0 z-20 flex items-center justify-between px-6 py-3 border-b border-primary/10 bg-background/80 backdrop-blur-sm">
+      <header className="absolute top-0 left-0 right-0 z-20 flex items-center justify-between gap-2 px-3 sm:px-6 py-2 sm:py-3 border-b border-primary/10 bg-background/80 backdrop-blur-sm">
 
         {/* Logo */}
         <div className="shrink-0">
           {/* eslint-disable-next-line @next/next/no-img-element */}
-          <img src="/logo.jpg" alt="GoGlobe" className="h-14 w-auto object-contain mix-blend-lighten" />
+          <img src="/logo.jpg" alt="GoGlobe" className="h-9 sm:h-14 w-auto object-contain mix-blend-lighten" />
         </div>
 
         {/* Search */}
-        <div className="relative w-full max-w-lg mx-6">
+        <div className="relative w-full max-w-lg mx-1 sm:mx-6 min-w-0">
           <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-primary/50 pointer-events-none" />
           <Input
             placeholder="Rechercher une destination..."
-            className="pl-9 bg-card/80 border-primary/20 focus:border-primary/50 placeholder:text-muted-foreground"
+            className="pl-9 bg-card/80 border-primary/20 focus:border-primary/50 placeholder:text-muted-foreground text-sm"
             value={search}
             onChange={(e) => setSearch(e.target.value)}
           />
@@ -406,15 +342,15 @@ export default function Home() {
         </div>
 
         {/* Right */}
-        <div className="shrink-0 flex items-center gap-3">
-          <div className="flex items-center gap-1.5 text-xs text-primary border border-primary/30 rounded-full px-3 py-1 bg-black/40">
+        <div className="shrink-0 flex items-center gap-2 sm:gap-3">
+          <div className="hidden sm:flex items-center gap-1.5 text-xs text-primary border border-primary/30 rounded-full px-3 py-1 bg-black/40">
             <span className="h-1.5 w-1.5 rounded-full bg-primary animate-pulse" />
             MVP
           </div>
           <Button
             variant="outline"
             size="sm"
-            className="border-primary/50 text-primary hover:bg-primary/10 hover:text-primary hover:border-primary"
+            className="border-primary/50 text-primary hover:bg-primary/10 hover:text-primary hover:border-primary px-2.5 sm:px-4 text-xs sm:text-sm"
           >
             Se connecter
           </Button>
@@ -422,12 +358,12 @@ export default function Home() {
       </header>
 
       {/* ── Content ──────────────────────────────────────────────────────────── */}
-      <div className="flex flex-1 pt-[57px]">
+      <div className="flex flex-1 pt-[52px] sm:pt-[57px]">
 
         {/* Globe area — fills remaining space */}
         <main className="flex-1 relative min-w-0 overflow-hidden">
           {/* Tagline */}
-          <p className="absolute top-5 left-1/2 -translate-x-1/2 z-10 text-[11px] tracking-[0.35em] text-primary/60 uppercase font-light select-none whitespace-nowrap">
+          <p className="hidden sm:block absolute top-5 left-1/2 -translate-x-1/2 z-10 text-[11px] tracking-[0.35em] text-primary/60 uppercase font-light select-none whitespace-nowrap">
             Votre concierge de voyage de luxe
           </p>
 
@@ -435,6 +371,7 @@ export default function Home() {
           <Globe3D
             destinations={DESTINATIONS}
             cityMarkers={CITY_MARKERS}
+            hotelMarkers={hotelMarkers}
             selected={selected}
             onSelect={openDestination}
             onCamDist={setCamDist}
@@ -443,156 +380,69 @@ export default function Home() {
           />
 
           {/* Centered text overlay */}
-          <div className="absolute bottom-[22%] left-1/2 -translate-x-1/2 z-10 text-center pointer-events-none">
-            <p className="text-[10px] tracking-[0.4em] uppercase text-primary/50 font-light mb-3">
+          <div className="absolute bottom-[15%] sm:bottom-[22%] left-1/2 -translate-x-1/2 z-10 text-center pointer-events-none px-4 w-full max-w-md">
+            <p className="text-[9px] sm:text-[10px] tracking-[0.3em] sm:tracking-[0.4em] uppercase text-primary/50 font-light mb-2 sm:mb-3">
               Trouvez votre prochain voyage
             </p>
             <h2
-              className="text-4xl italic text-primary"
+              className="text-2xl sm:text-4xl italic text-primary"
               style={{ fontFamily: "var(--font-playfair)" }}
             >
               Explorez le Monde
             </h2>
-            <p className="text-sm text-muted-foreground mt-2">
+            <p className="text-xs sm:text-sm text-muted-foreground mt-2">
               Cliquez sur une destination pour découvrir nos sélections exclusives
             </p>
           </div>
-        </main>
 
-        {/* ── Side panel — fixed overlay, slides over the globe ───────────── */}
-        <aside
-          className="fixed top-0 right-0 h-full z-40 flex flex-col border-l border-primary/10 bg-card overflow-hidden transition-transform duration-300 ease-out w-[420px]"
-          style={{ transform: selected ? "translateX(0)" : "translateX(100%)" }}
-        >
+          {/* Selected destination badge — no more side panel: hotels live as
+              points on the globe/city map, hover (desktop) or tap (mobile) on
+              a point to see its card. */}
           {selected && (
-            <div className="flex flex-col h-full w-[420px]">
-
-              {/* Header */}
-              <div className="px-8 pt-8 pb-5">
-                <div className="flex items-start justify-between">
-                  <div>
-                    <h2
-                      className="text-4xl font-bold text-primary"
-                      style={{ fontFamily: "var(--font-playfair)" }}
-                    >
-                      {selected.name}
-                    </h2>
-                    <p className="flex items-center gap-1.5 mt-1.5 text-sm text-muted-foreground">
-                      <MapPin className="h-3.5 w-3.5 text-primary/50" />
-                      <span>{selected.flag}</span>
-                      <span>{selected.country}</span>
-                    </p>
-                    {flightTime && (
-                      <p className="flex items-center gap-1.5 mt-1 text-xs text-primary/70">
-                        <Plane className="h-3 w-3" />
-                        <span>~{flightTime} depuis votre position</span>
-                      </p>
-                    )}
-                  </div>
-                  <button
-                    className="mt-1 h-8 w-8 rounded-full border border-primary/20 flex items-center justify-center text-muted-foreground hover:text-primary hover:border-primary/50 transition-colors"
-                    onClick={() => setSelected(null)}
-                  >
-                    <X className="h-4 w-4" />
-                  </button>
-                </div>
+            <div className="absolute top-3 left-1/2 -translate-x-1/2 sm:left-4 sm:translate-x-0 z-20 flex items-start gap-3 rounded-2xl border border-primary/20 bg-card/90 backdrop-blur-sm px-4 py-2.5 shadow-2xl max-w-[calc(100%-1.5rem)] sm:max-w-xs">
+              <div className="min-w-0">
+                <p
+                  className="flex items-center gap-1.5 text-lg font-bold text-primary truncate"
+                  style={{ fontFamily: "var(--font-playfair)" }}
+                >
+                  <span>{selected.flag}</span>
+                  <span className="truncate">{selected.name}</span>
+                </p>
+                <p className="flex items-center flex-wrap gap-x-2 gap-y-0.5 mt-0.5 text-[11px] text-muted-foreground">
+                  <span>{selected.country}</span>
+                  {flightTime && (
+                    <span className="flex items-center gap-1 text-primary/70">
+                      <Plane className="h-3 w-3" />
+                      ~{flightTime}
+                    </span>
+                  )}
+                </p>
+                <p className="mt-1 text-[10px] tracking-widest uppercase text-primary/40 font-light">
+                  {hotelsLoading
+                    ? "Recherche des hôtels…"
+                    : hotelsError
+                    ? "Hôtels indisponibles"
+                    : hotelMinStars === 5
+                    ? "★★★★★ Luxe"
+                    : hotelMinStars === 3
+                    ? "★★★+ Premium"
+                    : "Tous les hébergements"}
+                </p>
               </div>
-
-              {/* Tabs */}
-              <div className="px-8 border-b border-primary/10">
-                <div className="flex gap-6">
-                  {TABS.map(({ key, label }) => (
-                    <button
-                      key={key}
-                      className={`pb-3 text-sm font-medium border-b-2 -mb-px transition-colors ${
-                        activeTab === key
-                          ? "text-primary border-primary"
-                          : "text-muted-foreground border-transparent hover:text-foreground"
-                      }`}
-                      onClick={() => setActiveTab(key)}
-                    >
-                      {label}
-                    </button>
-                  ))}
-                </div>
-              </div>
-
-              {/* Cards */}
-              <div className="flex-1 overflow-y-auto px-8 py-5 space-y-3">
-                {activeTab === "hotels" ? (
-                  <>
-                    {/* Zoom tier label */}
-                    <p className="text-[10px] tracking-widest uppercase text-primary/40 font-light pb-1">
-                      {hotelMinStars === 5 ? "★★★★★ Luxe" : hotelMinStars === 4 ? "★★★★ Premium" : "Tous les hébergements"}
-                    </p>
-                    {hotelsLoading ? (
-                      <>
-                        <HotelSkeleton />
-                        <HotelSkeleton />
-                        <HotelSkeleton />
-                      </>
-                    ) : hotelsError ? (
-                      <div className="rounded-xl border border-primary/10 bg-background/60 p-4">
-                        <p className="text-xs text-muted-foreground">Impossible de charger les hôtels.</p>
-                        <p className="text-xs text-primary/60 mt-1 font-mono">{hotelsError}</p>
-                      </div>
-                    ) : liveHotels && liveHotels.length > 0 ? (
-                      liveHotels
-                        .filter((h) => h.rating >= hotelMinStars)
-                        .map((h) => <HotelCard key={h.hotelId} hotel={h} />)
-                    ) : (
-                      <p className="text-xs text-muted-foreground px-1">Aucun hôtel trouvé.</p>
-                    )}
-                    {/* Airbnb CTA at close zoom */}
-                    {showAirbnb && (
-                      <a
-                        href={`https://www.airbnb.com/s/${encodeURIComponent(selected?.name ?? "")}/homes`}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="flex items-center justify-between gap-3 rounded-xl border border-primary/10 bg-background/60 p-4 hover:border-primary/40 hover:bg-primary/5 transition-colors"
-                      >
-                        <div>
-                          <p className="font-medium text-sm text-foreground">Airbnb</p>
-                          <p className="text-xs text-muted-foreground mt-0.5">Appartements & maisons</p>
-                        </div>
-                        <ExternalLink className="h-4 w-4 text-primary/50 shrink-0" />
-                      </a>
-                    )}
-                  </>
-                ) : (
-                  tabItems.map((item) => <PlaceCard key={item.name} item={item} />)
-                )}
-              </div>
-
-              {/* CTA */}
-              <div className="px-8 pb-8 pt-3">
-                {activeTab === "hotels" && liveHotels && liveHotels.length > 0 ? (
-                  <a
-                    href={`https://www.booking.com/searchresults.html?ss=${encodeURIComponent(selected?.name ?? "")}`}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                  >
-                    <Button className="w-full gap-2 bg-primary text-background hover:bg-primary/90">
-                      <ExternalLink className="h-4 w-4" />
-                      Tous les hôtels sur Booking.com
-                    </Button>
-                  </a>
-                ) : (
-                  <Button
-                    variant="outline"
-                    className="w-full border-primary/40 text-primary hover:bg-primary/10 hover:border-primary/70"
-                  >
-                    Voir plus
-                  </Button>
-                )}
-              </div>
+              <button
+                className="mt-0.5 h-6 w-6 shrink-0 rounded-full border border-primary/20 flex items-center justify-center text-muted-foreground hover:text-primary hover:border-primary/50 transition-colors"
+                onClick={() => setSelected(null)}
+                aria-label="Fermer"
+              >
+                <X className="h-3.5 w-3.5" />
+              </button>
             </div>
           )}
-        </aside>
+        </main>
       </div>
 
       {/* Help button */}
-      <button className="fixed bottom-6 right-6 z-30 h-9 w-9 rounded-full border border-primary/25 bg-card flex items-center justify-center text-muted-foreground hover:text-primary hover:border-primary/50 transition-colors text-sm font-semibold">
+      <button className="fixed bottom-4 right-4 sm:bottom-6 sm:right-6 z-30 h-8 w-8 sm:h-9 sm:w-9 rounded-full border border-primary/25 bg-card flex items-center justify-center text-muted-foreground hover:text-primary hover:border-primary/50 transition-colors text-sm font-semibold">
         ?
       </button>
     </div>
