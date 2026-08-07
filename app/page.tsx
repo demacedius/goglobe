@@ -4,7 +4,8 @@ import { useState, useEffect, useMemo } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Search, MapPin, X, Plane } from "lucide-react";
-import { Globe3D } from "@/components/globe-3d";
+import { Globe3D, TIER2_DIST, TIER3_DIST } from "@/components/globe-3d";
+import { CityGoogleMap } from "@/components/city-google-map";
 
 function haversineKm(lat1: number, lon1: number, lat2: number, lon2: number): number {
   const R = 6371;
@@ -213,7 +214,18 @@ export default function Home() {
   }, [selected, userLatLon]);
 
   // Hotel zoom tier: 5★ far → 3-4★ medium → 2★ close (cumulative reveal)
-  const hotelMinStars = camDist > 2.3 ? 5 : camDist > 1.75 ? 3 : 2;
+  const hotelMinStars = camDist > TIER2_DIST ? 5 : camDist > TIER3_DIST ? 3 : 2;
+
+  // At the closest zoom tier, hand off from the 3D globe to a real,
+  // natively-zoomable Google Map (see CityGoogleMap) — dismissible so the
+  // user can drop back to the 3D view without fully deselecting the city,
+  // and it re-arms once they scroll back out past the tier-3 threshold.
+  const [mapDismissed, setMapDismissed] = useState(false);
+  useEffect(() => setMapDismissed(false), [selected?.name]);
+  useEffect(() => {
+    if (camDist > TIER3_DIST) setMapDismissed(false);
+  }, [camDist]);
+  const showGoogleMap = !!selected && camDist <= TIER3_DIST && !mapDismissed;
 
   // Filtered by star tier, plotted directly on the globe/city map as points
   const hotelMarkers = useMemo(
@@ -378,6 +390,20 @@ export default function Home() {
             userLatLon={userLatLon ?? undefined}
             className="absolute inset-0 w-full h-full"
           />
+
+          {/* Closest zoom tier: real Google Map takes over from the 3D globe.
+              Rendered as a sibling (not nested inside Globe3D) so it captures
+              its own scroll/click input instead of fighting the globe's wheel
+              zoom listener underneath. */}
+          {showGoogleMap && selected && (
+            <CityGoogleMap
+              lat={selected.lat}
+              lon={selected.lon}
+              hotels={hotelMarkers}
+              onExit={() => setMapDismissed(true)}
+              className="absolute inset-0 w-full h-full z-20"
+            />
+          )}
 
           {/* Centered text overlay */}
           <div className="absolute bottom-[15%] sm:bottom-[22%] left-1/2 -translate-x-1/2 z-10 text-center pointer-events-none px-4 w-full max-w-md">

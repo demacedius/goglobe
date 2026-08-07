@@ -19,8 +19,10 @@ const INITIAL_DIST = 4.0;
 // haven't zoomed yet" resting state — down to a narrower tier 3 sliver near
 // MIN_DIST, matching how zooming toward a sphere naturally decelerates
 // perceptually as you approach the surface.
-const TIER2_DIST = 2.6;
-const TIER3_DIST = 1.6;
+// Exported so page.tsx's hotel star-tier filter uses the exact same
+// boundaries instead of a separately hardcoded, easily-drifting copy.
+export const TIER2_DIST = 2.6;
+export const TIER3_DIST = 1.6;
 
 // City satellite map starts fading in as soon as a destination is selected
 // (tier 1) and keeps sharpening in opacity through tier 2 and tier 3, so it
@@ -775,7 +777,7 @@ export function Globe3D({
   }, [selected?.name]);
 
   return (
-    <div ref={containerRef} className={`relative ${className}`}>
+    <div ref={containerRef} className={className}>
       <Canvas
         className="absolute inset-0 w-full h-full"
         camera={{ position: [0, 0, INITIAL_DIST], fov: 42 }}
