@@ -39,8 +39,8 @@ const SATELLITE_FADE_START = 3.4;
 // drawn on the globe (larger than its true footprint so it stays legible).
 const SATELLITE_TIERS = [
   { fetchKm: 30, patchKm: 480 }, // tier 1 — first zoom, 5★ only
-  { fetchKm: 14, patchKm: 700 }, // tier 2 — 3-4★
-  { fetchKm: 6, patchKm: 950 },  // tier 3 — closest, 2★+
+  { fetchKm: 14, patchKm: 700 }, // tier 2 — 4★
+  { fetchKm: 6, patchKm: 950 },  // tier 3 — closest, 3-2★
 ] as const;
 
 function satelliteTierIndex(camDist: number): 0 | 1 | 2 {

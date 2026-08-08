@@ -213,8 +213,8 @@ export default function Home() {
     return formatFlightTime(km);
   }, [selected, userLatLon]);
 
-  // Hotel zoom tier: 5★ far → 3-4★ medium → 2★ close (cumulative reveal)
-  const hotelMinStars = camDist > TIER2_DIST ? 5 : camDist > TIER3_DIST ? 3 : 2;
+  // Hotel zoom tier: 5★ far → 4★ medium → 3-2★ close (cumulative reveal)
+  const hotelMinStars = camDist > TIER2_DIST ? 5 : camDist > TIER3_DIST ? 4 : 2;
 
   // At the closest zoom tier, hand off from the 3D globe to a real,
   // natively-zoomable Google Map (see CityGoogleMap) — dismissible so the
@@ -450,8 +450,8 @@ export default function Home() {
                     ? "Hôtels indisponibles"
                     : hotelMinStars === 5
                     ? "★★★★★ Luxe"
-                    : hotelMinStars === 3
-                    ? "★★★+ Premium"
+                    : hotelMinStars === 4
+                    ? "★★★★ Premium"
                     : "Tous les hébergements"}
                 </p>
               </div>
